@@ -1,0 +1,1958 @@
+---
+title: "Data analysis of the effect of direct payments on bush encroachment"
+author: "Maximilian Meyer"
+date: "2022-08-16"
+output: html_document
+---
+
+# Preparation
+Packages & options
+```{r include=FALSE}
+packs <- c("dplyr","plm", "psych","data.table","pglm","fitdistrplus","list",
+           "reshape2","tidyr","plyr","stargazer","splm","texreg","lmtest","ggcorrplot",
+           "ggthemes", "margins","tableHTML","ipw","crch","CBPS","ggplot2",
+           "cobalt")
+lapply(packs, require, character.only = TRUE)
+rm(packs)
+options(scipen = 999)
+```
+
+Read data
+```{r}
+# d <- read.csv("/home/agsad.admin.ch/f80865220/mnt/agroscope/Data-Work/25_Agricultural_Economics-RE/252_ZA-BH_Research_protected/Projekte/2022-27_Versuchsstation_Berg_Alp_memx/Daten/Processed_data/d_joined.csv")
+# d <- read.csv("/home/agsad.admin.ch/f80865220/mnt/agroscope/Data-Work/25_Agricultural_Economics-RE/252_ZA-BH_Research_protected/Projekte/2022-27_Versuchsstation_Berg_Alp_memx/Daten/Processed_data/gr_final_V2.csv")
+# d <- read.csv("~/mnt/Data-Work-RE/25_Agricultural_Economics-RE/252_ZA-BH_Research_protected/Projekte/2022-27_Versuchsstation_Berg_Alp_memx/Daten/Processed_data/gr_final_2009_2018_V2.csv")
+d <- read.csv("~/mnt/Data-Work-RE/25_Agricultural_Economics-RE/252_ZA-BH_Research_protected/Projekte/2022-27_Versuchsstation_Berg_Alp_memx/Daten/Processed_data/gr_final_2009_2018_V3.csv")
+
+
+# load(file = '~/mnt/Data-Work-RE/25_Agricultural_Economics-RE/252_ZA-BH_Research_protected/Projekte/2022-27_Versuchsstation_Berg_Alp_memx/Daten/Processed_data/env_V2.RData')
+```
+
+# Mutation
+```{r}
+d <- d %>% 
+  filter(is.na(NST_total) == F) %>%
+  filter(is.na(bush_encr) == F) %>%
+  # filter(JAHR != 1984) %>%
+  # filter(JAHR != 1998) %>%
+  subset(select = -c(X,X.1)) %>%
+  mutate(BFF_Q2 = ifelse(is.na(BFF_Q2) == T,0,BFF_Q2)) %>%
+  mutate(Vernetzungsprojekt = ifelse(is.na(Vernetzungsprojekt) == T, 0, Vernetzungsprojekt)) %>%
+  mutate(north = ifelse(Aspect_mean >= 315,1, ifelse(Aspect_mean <= 45, 1,0))) %>%
+  mutate(private_count = ifelse(RECHTSFORM == 1,1,0)) %>%
+  mutate(year_2018 = ifelse(JAHR == 2018, 1, 0)) %>%
+  mutate(DP_total_k = DP_total/1000) %>%
+  mutate(Soemmerungsbeitrag_k = Soemmerungsbeitrag/1000) %>%
+  mutate(BFF_Q2_k = BFF_Q2/1000) %>%
+  mutate(Vernetzungsprojekt_k = Vernetzungsprojekt/1000) 
+```
+
+```{r}
+d <- mutate(d, private_count = ifelse(RECHTSFORM == 1,1,0))
+d <- mutate(d, year_2018 = ifelse(JAHR == 2018, 1, 0))
+
+d <- mutate(d, GEBURT_GRUENDUNG = ifelse(GEBURT_GRUENDUNG == 0, NA,GEBURT_GRUENDUNG))
+d <- mutate(d, GEBURT_GRUENDUNG = ifelse(is.na(GEBURT_GRUENDUNG) == T, 
+                                     mean(GEBURT_GRUENDUNG, na.rm = T),GEBURT_GRUENDUNG))
+
+d <- mutate(d, soil_water_capacity = ifelse(soil_water_capacity == -9999, NA,soil_water_capacity))
+d <- mutate(d, soil_water_capacity = ifelse(is.na(soil_water_capacity) == T, 
+                                     mean(soil_water_capacity, na.rm = T),soil_water_capacity))
+
+d <- mutate(d, soil_nutrient_capacity = ifelse(soil_nutrient_capacity == -9999, NA,soil_nutrient_capacity))
+d <- mutate(d, soil_nutrient_capacity = ifelse(is.na(soil_nutrient_capacity) == T, 
+                                     mean(soil_nutrient_capacity, na.rm = T),soil_nutrient_capacity))
+
+d <- mutate(d, precip = precip + (1619.6 - mean(d$precip))) #1619.6 is the average precipitation between 1980 and 2010
+d <- mutate(d, Shape_Area = Shape_Area/10000)
+
+d <- mutate(d, bush_encr_ha = bush_encr*Shape_Area)
+d <- mutate(d, grazing_ha = grazing*Shape_Area)
+
+d <- mutate(d, grazing_intensity = ifelse(is.na(NST_total/grazing_ha) == T,NA, 
+                                   ifelse(is.infinite(NST_total/grazing_ha) == T,NA,
+                                   NST_total/grazing_ha)))
+d <- mutate(d, Nst_per_area = ifelse(is.na(NST_total/Shape_Area) == T,NA, 
+                                   ifelse(is.infinite(NST_total/Shape_Area) == T,NA,
+                                   NST_total/Shape_Area)))
+```
+
+### Treatment assignment
+```{r}
+d_wide <- subset(d, select = c(KT_ID_B, JAHR, DP_total, Soemmerungsbeitrag, Vernetzungsprojekt, BFF_Q2, NST_total))
+
+d_wide <- reshape(d_wide, timevar = "JAHR", idvar = "KT_ID_B", direction = "wide")
+colnames(d_wide)
+
+d_wide <- d_wide  %>% 
+  mutate(DP_total.2009 = ifelse(is.na(DP_total.2009) == T, 0, DP_total.2009)) %>%
+  mutate(DP_total.2018 = ifelse(is.na(DP_total.2018) == T, 0, DP_total.2018)) %>%
+  mutate(Soemmerungsbeitrag.2009 = ifelse(is.na(Soemmerungsbeitrag.2009) == T, 0, 
+                                          Soemmerungsbeitrag.2009)) %>%
+  mutate(Soemmerungsbeitrag.2018 = ifelse(is.na(Soemmerungsbeitrag.2018) == T, 0,  
+                                          Soemmerungsbeitrag.2018)) %>%
+  mutate(Vernetzungsprojekt.2009 = ifelse(is.na(Vernetzungsprojekt.2009) == T, 0, 
+                                          Vernetzungsprojekt.2009)) %>%
+  mutate(Vernetzungsprojekt.2018 = ifelse(is.na(Vernetzungsprojekt.2018) == T, 0, 
+                                          Vernetzungsprojekt.2018)) %>%
+  mutate(BFF_Q2.2009 = ifelse(is.na(BFF_Q2.2009) == T, 0, BFF_Q2.2009)) %>%  
+  mutate(BFF_Q2.2018 = ifelse(is.na(BFF_Q2.2018) == T, 0, BFF_Q2.2018)) %>%
+  mutate(NST_total.2009 = ifelse(is.na(NST_total.2009) == T, 0, NST_total.2009)) %>%  
+  mutate(NST_total.2018 = ifelse(is.na(NST_total.2018) == T, 0, NST_total.2018)) 
+  
+
+  
+d_wide <- d_wide %>%
+  mutate(treatment_dp_total = ifelse(DP_total.2018 > DP_total.2009, 1, 0)) %>%
+  mutate(treatment_sommerungsbeitrag = ifelse(Soemmerungsbeitrag.2018 > Soemmerungsbeitrag.2009, 1, 0)) %>%
+  mutate(treatment_bff_q2 = ifelse(BFF_Q2.2018 > BFF_Q2.2009, 1, 0)) %>%
+  mutate(treatment_vernetzungsprojekt = ifelse(Vernetzungsprojekt.2018 > Vernetzungsprojekt.2009, 1, 0)) %>%
+  mutate(treatment_NST = ifelse(NST_total.2018 > NST_total.2009, 1, 0))
+
+# lapply(d_wide, summary)
+# 
+# table(d_wide$treatment_dp_total)
+# table(d_wide$treatment_sommerungsbeitrag)
+# table(d_wide$treatment_bff_q2)
+# table(d_wide$treatment_vernetzungsprojekt)
+# 
+# colnames(d_wide)
+
+d_long <- reshape(d_wide, direction = "long")
+colnames(d_long) <- c("KT_ID_B", "treatment_dp_total","treatment_sommerungsbeitrag", "treatment_bff_q2",
+                      "treatment_vernetzungsprojekt", "JAHR", "DP_total", "Soemmerungsbeitrag", 
+                      "Vernetzungsprojekt", "BFF_Q2")
+d_long <- subset(d_long, select = c(KT_ID_B, JAHR, treatment_dp_total, treatment_sommerungsbeitrag,
+                                    treatment_bff_q2, treatment_vernetzungsprojekt, treatment_NST))
+
+d <- merge(d, d_long, by = c("KT_ID_B","JAHR")) 
+
+rm(d_long,d_wide)
+
+#### Increase in NST as treatment
+d_wide <- subset(d, select = c(KT_ID_B, JAHR,NST_total))
+
+d_wide <- reshape(d_wide, timevar = "JAHR", idvar = "KT_ID_B", direction = "wide")
+colnames(d_wide)
+
+d_wide <- d_wide  %>% 
+  mutate(NST_total.2009 = ifelse(is.na(NST_total.2009) == T, 0, NST_total.2009)) %>%  
+  mutate(NST_total.2018 = ifelse(is.na(NST_total.2018) == T, 0, NST_total.2018)) 
+  
+d_wide <- d_wide %>%
+  mutate(treatment_NST = ifelse(NST_total.2018 > NST_total.2009, 1, 0))
+
+
+d_long <- reshape(d_wide, direction = "long")
+colnames(d_long) <- c("KT_ID_B", "treatment_NST","JAHR", "NST_total")
+d_long <- subset(d_long, select = c(KT_ID_B, JAHR, treatment_NST))
+
+d <- merge(d, d_long, by = c("KT_ID_B","JAHR")) 
+
+rm(d_long,d_wide)
+
+d <- mutate(d, treatment_bff_q2_varying = ifelse(treatment_bff_q2 == 1 & JAHR == 2009, 0,
+                                          ifelse(treatment_bff_q2 == 1 & JAHR == 2018, 1,0)))
+
+d <- mutate(d, treatment_sommerungsbeitrag_varying = ifelse(treatment_sommerungsbeitrag == 1 & JAHR == 2009, 0,
+                                          ifelse(treatment_sommerungsbeitrag == 1 & JAHR == 2018, 1,0)))
+
+d <- mutate(d, treatment_vernetzungsprojekt_varying = ifelse(treatment_vernetzungsprojekt == 1 & JAHR == 2009, 0,
+                                          ifelse(treatment_vernetzungsprojekt == 1 & JAHR == 2018, 1,0)))
+
+d <- mutate(d, treatment_dp_total_varying = ifelse(treatment_dp_total == 1 & JAHR == 2009, 0,
+                                          ifelse(treatment_dp_total == 1 & JAHR == 2018, 1,0)))
+
+d <- mutate(d, treatment_NST_varying = ifelse(treatment_NST == 1 & JAHR == 2009, 0,
+                                          ifelse(treatment_NST == 1 & JAHR == 2018, 1,0)))
+
+d <- mutate(d, NST_milchkuehe_per_ha = d$NST_milchkuehe/d$Shape_Area)
+d <- mutate(d, NST_rinder_per_ha = d$NST_rinder/d$Shape_Area)
+d <- mutate(d, NST_schafe_per_ha = d$NST_schafe/d$Shape_Area)
+d <- mutate(d, NST_ziegen_per_ha = d$NST_ziegen/d$Shape_Area)
+```
+
+Panel data frame
+```{r}
+pdf <- d
+
+pdf$unique_id <- paste(pdf$ALPNR,pdf$JAHR) # concatenate to make unique ID
+
+pdf$duplicate = duplicated(pdf$unique_id) # generate the duplicate variable
+
+dublicate <- subset(pdf, duplicate=="TRUE") # find the duplicate
+
+length(unique(dublicate$ALPNR))
+unique(dublicate$ALPNR)
+
+pdf <- d[d$ALPNR != unique(dublicate$ALPNR),]
+pdf <- pdata.frame(pdf, index = c("ALPNR","JAHR"))
+
+d <- d[d$ALPNR != unique(dublicate$ALPNR),]
+
+
+length(unique(d$ALPNR))
+length(unique(d$ALPNR[d$JAHR ==2009]))
+length(unique(d$ALPNR[d$JAHR ==2018]))
+
+d$ALPNR_numeric <- as.numeric(factor(d$ALPNR)) # numeric country ID
+pdf_balanced <- make.pbalanced(pdf, balance.type = c("shared.individuals"), 
+                               index = c("ALPNR","JAHR"))
+plm::is.pbalanced(pdf_balanced)
+
+write.csv(pdf_balanced,"~/mnt/Data-Work-RE/25_Agricultural_Economics-RE/252_ZA-BH_Research_protected/Projekte/2022-27_Versuchsstation_Berg_Alp_memx/Daten/Processed_data/gr_final_2009_2018_V3.csv")
+```
+
+# _________________
+# Descriptives
+##### Outcome development
+
+Total DP as treatment
+Before after, with and without
+```{r}
+d.treated <- d[d$treatment_dp_total == 1,]
+d.treated <- unlist(describeBy(x = d.treated$bush_encr,group = d.treated$JAHR))
+
+
+d.controls <- d[d$treatment_dp_total == 0,]
+d.controls <- unlist(describeBy(x = d.controls$bush_encr, group = d.controls$JAHR))
+
+d.mean <- as.data.frame(t(rbind(d.treated,d.controls)))
+
+rm(d.treated,d.controls)
+
+d.mean$rownames <- rownames(d.mean)
+cols <- colsplit(string = d.mean$rownames, pattern = '.',names = c("year", "stats"))
+d.mean <- cbind(d.mean, cols)
+
+colnames(d.mean) <- c("d.treated","d.controls","rnames", "year", "stats")
+
+d.mean <- separate(d.mean, col = 3, into = c("year", "stats"), sep = 5, remove = T)
+
+colnames(d.mean) <- c("treated","controls","year","stats")
+
+levels(as.factor(d.mean$stats))
+
+d.mean <- d.mean[d.mean$stats == "mean",]
+
+
+class(d.mean$year)
+d.mean$year <- as.integer(d.mean$year)
+
+ggplot(d.mean) +
+          geom_point(aes(year,treated), col = "blue") + 
+          geom_point(aes(year,controls), col = "grey") + 
+          geom_line(aes(year,treated), col = "blue") + 
+          geom_line(aes(year,controls), col = "grey") + 
+          coord_cartesian(ylim = c(0,0.25), xlim = c(2006,2021)) + 
+          scale_x_continuous(breaks = c(2006,2009,2012,2015,2018,2021)) + 
+          labs(title = "Increased total direct payments",x = "Year",y = "Average % bush encroachment") +
+          theme_economist_white() +
+          geom_vline(xintercept = 2013,linetype = "dashed", color = "grey")
+
+ggplot(d.mean) +
+          geom_point(aes(year,treated), col = "blue") +
+          geom_point(aes(year,controls), col = "black") +
+          geom_line(aes(year,treated), col = "blue") +
+          geom_line(aes(year,controls), col = "black") +
+          coord_cartesian(ylim = c(0.1,0.2), xlim = c(2006,2021)) +
+          scale_x_continuous(breaks = c(2006,2009,2012,2015,2018,2021)) +
+          scale_y_continuous(breaks = c(0.1,
+                                        round(d.mean$treated[d.mean$year ==2009],digits = 3),
+                                        round(d.mean$controls[d.mean$year ==2009],digits = 3),
+                                        round(d.mean$treated[d.mean$year ==2018],digits = 3),
+                                        round(d.mean$controls[d.mean$year ==2018],digits = 3),
+                                        0.2),guide = guide_axis(n.dodge=2)) +
+          geom_vline(xintercept = c(2009,2018), color = "grey") +
+          geom_hline(yintercept = c(d.mean$treated[d.mean$year ==2009],
+                                        d.mean$controls[d.mean$year ==2009],
+                                        d.mean$treated[d.mean$year ==2018],
+                                        d.mean$controls[d.mean$year ==2018]), color = "grey") +
+          labs(title = "Treatment = Increased total direct payments",x = "Year",y = "Average % bush encroachment") +
+          theme_classic() +
+          geom_vline(xintercept = 2013,linetype = "dashed", color = "grey")
+          #+theme(axis.text.y = element_text(angle = 45))
+  
+
+
+ggsave(filename = "Bush_encr_treat_control_DPtotal_DiD.png",width = 12,height = 8,units = "cm", dpi = 300,
+       path = "~/mnt/agroscope/OSLW-SYNC/99_Transfer/Sync_9981/memx")
+
+rm(d.mean, cols)
+```
+
+EFA as treatment
+```{r}
+d.treated <- d[d$treatment_bff_q2 == 1,]
+d.treated <- unlist(describeBy(x = d.treated$bush_encr,group = d.treated$JAHR))
+
+
+d.controls <- d[d$treatment_bff_q2 == 0,]
+d.controls <- unlist(describeBy(x = d.controls$bush_encr, group = d.controls$JAHR))
+
+d.mean <- as.data.frame(t(rbind(d.treated,d.controls)))
+
+rm(d.treated,d.controls)
+
+d.mean$rownames <- rownames(d.mean)
+cols <- colsplit(string = d.mean$rownames, pattern = '.',names = c("year", "stats"))
+d.mean <- cbind(d.mean, cols)
+
+colnames(d.mean) <- c("d.treated","d.controls","rnames", "year", "stats")
+
+d.mean <- separate(d.mean, col = 3, into = c("year", "stats"), sep = 5, remove = T)
+
+colnames(d.mean) <- c("treated","controls","year","stats")
+
+levels(as.factor(d.mean$stats))
+
+d.mean <- d.mean[d.mean$stats == "mean",]
+
+
+class(d.mean$year)
+d.mean$year <- as.integer(d.mean$year)
+
+ggplot(d.mean) +
+          geom_point(aes(year,treated), col = "blue") + 
+          geom_point(aes(year,controls), col = "grey") + 
+          geom_line(aes(year,treated), col = "blue") + 
+          geom_line(aes(year,controls), col = "grey") + 
+          coord_cartesian(ylim = c(0,0.25), xlim = c(2006,2021)) + 
+          scale_x_continuous(breaks = c(2006,2009,2012,2015,2018,2021)) + 
+          labs(title = "EFA payments",x = "Year",y = "Average % bush encroachment") +
+          theme_economist_white() +
+          geom_vline(xintercept = 2013,linetype = "dashed", color = "grey")
+
+
+ggsave(filename = "Bush_encr_treat_control_EFA.png",width = 12,height = 8,units = "cm", dpi = 300,
+       path = "~/mnt/agroscope/OSLW-SYNC/99_Transfer/Sync_9981/memx")
+
+rm(d.mean, cols)
+```
+EFA as treatment
+```{r}
+d.treated <- d[d$treatment_sommerungsbeitrag == 1,]
+d.treated <- unlist(describeBy(x = d.treated$bush_encr,group = d.treated$JAHR))
+
+
+d.controls <- d[d$treatment_sommerungsbeitrag == 0,]
+d.controls <- unlist(describeBy(x = d.controls$bush_encr, group = d.controls$JAHR))
+
+d.mean <- as.data.frame(t(rbind(d.treated,d.controls)))
+
+rm(d.treated,d.controls)
+
+d.mean$rownames <- rownames(d.mean)
+cols <- colsplit(string = d.mean$rownames, pattern = '.',names = c("year", "stats"))
+d.mean <- cbind(d.mean, cols)
+
+colnames(d.mean) <- c("d.treated","d.controls","rnames", "year", "stats")
+
+d.mean <- separate(d.mean, col = 3, into = c("year", "stats"), sep = 5, remove = T)
+
+colnames(d.mean) <- c("treated","controls","year","stats")
+
+levels(as.factor(d.mean$stats))
+
+d.mean <- d.mean[d.mean$stats == "mean",]
+
+
+class(d.mean$year)
+d.mean$year <- as.integer(d.mean$year)
+
+ggplot(d.mean) +
+          geom_point(aes(year,treated), col = "blue") + 
+          geom_point(aes(year,controls), col = "grey") + 
+          geom_line(aes(year,treated), col = "blue") + 
+          geom_line(aes(year,controls), col = "grey") + 
+          coord_cartesian(ylim = c(0,0.25), xlim = c(2006,2021)) + 
+          scale_x_continuous(breaks = c(2006,2009,2012,2015,2018,2021)) + 
+          labs(title = "Increased grazing payments",x = "Year",y = "Average % bush encroachment") +
+          theme_economist_white() +
+          geom_vline(xintercept = 2013,linetype = "dashed", color = "grey")
+
+
+ggsave(filename = "Bush_encr_treat_control_grazing.png",width = 12,height = 8,units = "cm", dpi = 300,
+       path = "~/mnt/agroscope/OSLW-SYNC/99_Transfer/Sync_9981/memx")
+
+rm(d.mean, cols)
+```
+
+Landscape quality as treatment
+```{r}
+d.treated <- d[d$treatment_vernetzungsprojekt == 1,]
+d.treated <- unlist(describeBy(x = d.treated$bush_encr,group = d.treated$JAHR))
+
+
+d.controls <- d[d$treatment_vernetzungsprojekt == 0,]
+d.controls <- unlist(describeBy(x = d.controls$bush_encr, group = d.controls$JAHR))
+
+d.mean <- as.data.frame(t(rbind(d.treated,d.controls)))
+
+rm(d.treated,d.controls)
+
+d.mean$rownames <- rownames(d.mean)
+cols <- colsplit(string = d.mean$rownames, pattern = '.',names = c("year", "stats"))
+d.mean <- cbind(d.mean, cols)
+
+colnames(d.mean) <- c("d.treated","d.controls","rnames", "year", "stats")
+
+d.mean <- separate(d.mean, col = 3, into = c("year", "stats"), sep = 5, remove = T)
+
+colnames(d.mean) <- c("treated","controls","year","stats")
+
+levels(as.factor(d.mean$stats))
+
+d.mean <- d.mean[d.mean$stats == "mean",]
+
+
+class(d.mean$year)
+d.mean$year <- as.integer(d.mean$year)
+
+ggplot(d.mean) +
+          geom_point(aes(year,treated), col = "blue") + 
+          geom_point(aes(year,controls), col = "grey") + 
+          geom_line(aes(year,treated), col = "blue") + 
+          geom_line(aes(year,controls), col = "grey") + 
+          coord_cartesian(ylim = c(0,0.25), xlim = c(2006,2021)) + 
+          scale_x_continuous(breaks = c(2006,2009,2012,2015,2018,2021)) + 
+          labs(title = "Landscape quality payments",x = "Year",y = "Average % bush encroachment") +
+          theme_economist_white() +
+          geom_vline(xintercept = 2013,linetype = "dashed", color = "grey")
+
+
+ggsave(filename = "Bush_encr_treat_control_LQ.png",width = 12,height = 8,units = "cm", dpi = 300,
+       path = "~/mnt/agroscope/OSLW-SYNC/99_Transfer/Sync_9981/memx")
+
+rm(d.mean, cols)
+```
+Density distribution by bush encroachment quantity
+```{r}
+
+# Total DP as treatment
+ggplot(data = d) +
+  geom_density(aes(bush_encr, group = treatment_dp_total, color = treatment_dp_total),
+               kernel = "gaussian") +
+  theme_bw() +
+  labs(x = "% Bush encroachment",y = "Density") +
+  theme_economist_white() +
+  theme(legend.position = "")
+
+ggsave(filename = "Bush_encr_dist_by_treatment_total.png",width = 20,height = 15,units = "cm", dpi = 300,
+       path = "~/mnt/Data-Work-RE/25_Agricultural_Economics-RE/252_ZA-BH_Research_protected/Projekte/2022-27_Versuchsstation_Berg_Alp_memx/R/Output/Bush_encr")
+
+# BFF as Treatment
+ggplot(data = d) +
+  geom_density(aes(bush_encr, group = treatment_bff_q2, color = treatment_bff_q2),
+               kernel = "gaussian") +
+  theme_bw() +
+  labs(x = "% Bush encroachment",y = "Density") +
+  theme_economist_white() +
+  theme(legend.position = "")
+
+ggsave(filename = "Bush_encr_dist_by_treatment_bff.png",width = 20,height = 15,units = "cm", dpi = 300,
+       path = "~/mnt/Data-Work-RE/25_Agricultural_Economics-RE/252_ZA-BH_Research_protected/Projekte/2022-27_Versuchsstation_Berg_Alp_memx/R/Output/Bush_encr")
+
+
+ggplot(data = d,aes(bush_encr, group = JAHR, color = JAHR),) +
+  geom_histogram(bins = 50) +
+  theme_bw()
+
+ggplot(data = d,aes(bush_encr, group = JAHR, color = JAHR),) +
+  #geom_histogram(bins = 50) +
+  geom_density(kernel = "gaussian") +
+  geom_vline(xintercept = c(0,0.2,0.6), color = "grey") +
+  geom_hline(yintercept = 0, color = "grey") +
+  theme_bw() + 
+  labs(x = "Bush encroachment",y = "Density")
+
+ggplot(data = d) +
+  geom_density(aes(bush_encr),kernel = "gaussian") +
+  labs(title = "Distribution of bush encroachment (in %) in 
+       treated (blue) and control (grey) pixels",x = "% Bush encroachment",y = "Density") +
+  theme_economist_white() +
+  theme(legend.position = "")
+
+ggsave(filename = "Bush_encr_dist_per_year.png",width = 20,height = 15,units = "cm", dpi = 300,
+       path = "~/mnt/Data-Work-RE/25_Agricultural_Economics-RE/252_ZA-BH_Research_protected/Projekte/2022-27_Versuchsstation_Berg_Alp_memx/R/Output/Bush_encr")
+```
+
+##### Treatment development
+```{r}
+ggplot(d[d$treatment_dp_total == 1 & d$JAHR == 2018,]) +
+  geom_histogram(aes(DP_total), color = "grey", bins = 50) +
+  # geom_histogram(aes(Soemmerungsbeitrag),color = "red", fill = "red", bins = 50) +
+  # geom_histogram(aes(BFF_Q2), color = "green", fill = "green", bins = 50) +
+  # geom_histogram(aes(Vernetzungsprojekt),color = "blue", fill = "blue", bins = 50) +
+  theme_economist_white() + 
+  labs(x = "Total direct payments [CHF]",y = "Count") +
+           theme_economist_white()
+  
+ggplot(data = d,aes(DP_total, group = treatment_dp_total, color = treatment_dp_total),) +
+  #geom_histogram(bins = 50) +
+  geom_density(kernel = "gaussian") +
+  #geom_vline(xintercept = c(0,0.2,0.6), color = "grey") +
+  geom_hline(yintercept = 0, color = "grey") +
+  theme_bw() + 
+  labs(x = "Total DP [CHF]",y = "Density")
+
+ggsave(filename = "Treatment_dp_total_developm.png",width = 20,height = 15,units = "cm", dpi = 300,
+       path = "~/mnt/Data-Work-RE/25_Agricultural_Economics-RE/252_ZA-BH_Research_protected/Projekte/2022-27_Versuchsstation_Berg_Alp_memx/R/Output/Bush_encr")
+
+ggplot(d[d$treatment_sommerungsbeitrag == 1 & d$JAHR == 2018,]) +
+  geom_histogram(aes(DP_total), color = "grey", bins = 50) +
+  # geom_histogram(aes(Soemmerungsbeitrag),color = "red", fill = "red", bins = 50) +
+  # geom_histogram(aes(BFF_Q2), color = "green", fill = "green", bins = 50) +
+  # geom_histogram(aes(Vernetzungsprojekt),color = "blue", fill = "blue", bins = 50) +
+  theme_economist_white() + 
+  labs(x = "Total direct payments [CHF]",y = "Count") +
+           theme_economist_white()
+
+ggplot(d[d$treatment_bff_q2 == 1 & d$JAHR == 2018,]) +
+  geom_histogram(aes(DP_total), color = "grey", bins = 50) +
+  # geom_histogram(aes(Soemmerungsbeitrag),color = "red", fill = "red", bins = 50) +
+  # geom_histogram(aes(BFF_Q2), color = "green", fill = "green", bins = 50) +
+  # geom_histogram(aes(Vernetzungsprojekt),color = "blue", fill = "blue", bins = 50) +
+  theme_economist_white() + 
+  labs(x = "Total direct payments [CHF]",y = "Count") +
+           theme_economist_white()
+
+
+ggplot(d[d$treatment_vernetzungsprojekt == 1 & d$JAHR == 2018,]) +
+  # geom_density(aes(Vernetzungsprojekt),kernel = "gaussian") 
+  geom_histogram(aes(Vernetzungsprojekt), color = "grey", bins = 50) +
+  # geom_histogram(aes(Soemmerungsbeitrag),color = "red", fill = "red", bins = 50) +
+  # geom_histogram(aes(BFF_Q2), color = "green", fill = "green", bins = 50) +
+  # geom_histogram(aes(Vernetzungsprojekt),color = "blue", fill = "blue", bins = 50) +
+  theme_economist_white() + 
+  labs(x = "Total direct payments [CHF]",y = "Count") +
+           theme_economist_white()
+```
+
+##### Animal Development
+
+```{r}
+ggplot(data = d) +
+  #geom_histogram(bins = 50) +
+  #geom_density(aes(asinh(NST_total), group = JAHR, color = JAHR),kernel = "gaussian") +
+  geom_density(aes(asinh(NST_milchkuehe), group = JAHR, color = JAHR),kernel = "gaussian") +
+  #geom_density(aes(asinh(NST_schafe), group = JAHR, color = JAHR),kernel = "gaussian") +
+  geom_vline(xintercept = 0, color = "grey") +
+  geom_hline(yintercept = 0, color = "grey") +
+  theme_bw() + 
+  labs(x = "Total NST (inverse hyperbolic sine)",y = "Density")
+
+ggsave(filename = "NSt_total_ihs.png",width = 20,height = 15,units = "cm", dpi = 300,
+       path = "~/mnt/agroscope/OSLW-SYNC/99_Transfer/Sync_9981/memx")
+
+ggplot(data = d) +
+  geom_density(aes(asinh(grazing_intensity), group = JAHR, color = JAHR),kernel = "gaussian") +
+  geom_vline(xintercept = 0, color = "grey") +
+  geom_hline(yintercept = 0, color = "grey") +
+  theme_bw() + 
+  labs(x = "Grazing intensity (NST/ha grazing area)",y = "Density")
+```
+
+```{r}
+ggplot(data = d) +
+  geom_density(aes(asinh(NST_milchkuehe), group = JAHR, color = JAHR),kernel = "gaussian") +
+  geom_vline(xintercept = 0, color = "grey") +
+  geom_hline(yintercept = 0, color = "grey") +
+  theme_bw() + 
+  labs(x = "Milking cows (Nst)",y = "Density")
+
+ggplot(data = d) +
+  geom_density(aes(asinh(NST_schafe), group = JAHR, color = JAHR),kernel = "gaussian") +
+  geom_vline(xintercept = 0, color = "grey") +
+  geom_hline(yintercept = 0, color = "grey") +
+  theme_bw() + 
+  labs(x = "Sheep (NST)",y = "Density")
+
+ggplot(data = d) +
+  geom_density(aes(asinh(NST_rinder), group = JAHR, color = JAHR),kernel = "gaussian") +
+  geom_vline(xintercept = 0, color = "grey") +
+  geom_hline(yintercept = 0, color = "grey") +
+  theme_bw() + 
+  labs(x = "Cattle (NST)",y = "Density")
+
+ggplot(data = d) +
+  geom_density(aes(asinh(NST_ziegen), group = JAHR, color = JAHR),kernel = "gaussian") +
+  geom_vline(xintercept = 0, color = "grey") +
+  geom_hline(yintercept = 0, color = "grey") +
+  theme_bw() + 
+  labs(x = "Goats (NST) (inverse hyperbolic sine)",y = "Density")
+
+
+ggsave(filename = "NSt_total_ihs.png",width = 20,height = 15,units = "cm", dpi = 300,
+       path = "~/mnt/agroscope/OSLW-SYNC/99_Transfer/Sync_9981/memx")
+
+# plot_densities_year <- function(dataframe, variable, year) {
+#   ggplot(data = dataframe) +
+#   geom_density(aes(asinh(variable), group = year, color = year),kernel = "gaussian") +
+#   geom_vline(xintercept = 0, color = "grey") +
+#   geom_hline(yintercept = 0, color = "grey") +
+#   theme_bw() + 
+#   labs(x = paste(variable),y = "Density")
+# }
+# paste()
+# 
+# plot_densities_year(d, d$NST_milchkuehe, d$JAHR)
+# 
+# animals <- subset(d, select = c(NST_total,NST_milchkuehe,NST_rinder, NST_schafe,NST_ziegen, NST_andere))
+# 
+# lapply(list(animals),plot_densities_year)
+```
+
+
+##### Covariate summary
+```{r}
+var <- describe(d[c("bush_encr","DP_total",
+                    "Soemmerungsbeitrag","BFF_Q2","Vernetzungsprojekt",
+                    "Nst_per_area","NST_milchkuehe_per_ha","NST_rinder_per_ha",
+                    "NST_schafe_per_ha","NST_ziegen_per_ha",
+                    "GEBURT_GRUENDUNG", "private_count","access_trvl_time_min","Shape_Area", 
+                    "grazing","grazing_ha",
+                    "north","precip","temp","population", "elevation_mean",
+                    "soil_water_capacity","soil_nutrient_capacity",
+                    "ProNatura_Naturschutzgebiet","Wildtierkorridor_ueberregional")])
+
+var <- subset(var, select =  c(n,mean,sd,min,max))
+
+write_tableHTML(tableHTML(var, round = 3), file = "~/mnt/agroscope/OSLW-SYNC/99_Transfer/Sync_9981/memx/Dataframe_summary.html")
+```
+
+##### Covariate balance
+```{r}
+var <- c("GEBURT_GRUENDUNG", "private_count","Shape_Area",
+         "NST_total","NST_schafe", "NST_rinder","NST_ziegen","NST_andere",
+         "grazing_intensity","Shape_Area","grazing", "grazing_ha", 
+         "north","precip","temp","population", "elevation_mean",
+         "soil_water_capacity","soil_nutrient_capacity","access_trvl_time_min",
+         "treatment_dp_total","JAHR")
+var <- d[var]
+
+var <- var[var$JAHR == 2009,]
+
+desc <- describeBy(x = var,group = var$treatment_dp_total)
+desc0 <- as.data.frame(desc$`0`)
+desc0 <- subset(desc0, select =  c(n,mean,sd,min,max))
+
+desc1 <- as.data.frame(desc$`1`)
+desc1 <- subset(desc1, select =  c(n,mean,sd,min,max))
+
+desc <- rbind(desc1,desc0)
+desc <- desc[-c(23),]
+
+write_tableHTML(tableHTML(desc, round = 3), file =
+                  "~/mnt/agroscope/OSLW-SYNC/99_Transfer/Sync_9981/memx/Covariates_Treatment_totaldp_2009.html")
+rm(desc,desc0,desc1,var)
+```
+
+
+# Correlations
+
+```{r}
+# Numerical only
+n <- which(colnames(d) %in% c("DP_total","Soemmerungsbeitrag", "Vernetzungsprojekt", "BFF_Q2","bush_encr","GEBURT_GRUENDUNG", "NST_schafe", "NST_rinder","NST_ziegen","NST_andere","NST_total"
+))
+
+variabledf <- d[,c(n)] # subset of variables used in regressions
+
+sapply(variabledf, class)
+
+# Computing correlation matrix
+correlation_matrix <- round(cor(variabledf),3)
+  
+# Computing correlation matrix with p-values
+corrp.mat <- cor_pmat(variabledf)
+  
+# Visualizing the correlation matrix using 
+# square and circle methods
+ggcorrplot(correlation_matrix, method = "square")
+ggcorrplot(correlation_matrix, method = "circle")
+
+ggcorrplot(correlation_matrix, hc.order = TRUE, lab = TRUE, 
+           type ="upper", p.mat = corrp.mat)
+getwd()
+ggsave(filename = "corr.png", path = "/home/agsad.admin.ch/f80865220/mnt/agroscope/Data-Work/25_Agricultural_Economics-RE/252_ZA-BH_Research_protected/Projekte/2022-27_Versuchsstation_Berg_Alp_memx/R/Output",
+       device = "png", dpi = 300, units = "cm", width = 25, height = 20)
+
+```
+
+Version 2
+```{r}
+# Numerich only
+n <- which(colnames(d) %in% c("bush_encr","DP_total","Soemmerungsbeitrag", "Vernetzungsprojekt", "BFF_Q2", "GEBURT_GRUENDUNG", "private_count", "NST_total","NST_schafe", "NST_rinder","NST_ziegen","NST_andere","north","precip","temp","population","elevation_mean","soil_water_capacity","soil_nutrient_capacity","access_trvl_time_min"))
+
+variabledf <- d[,c(n)] # subset of variables used in regressions
+
+#sapply(variabledf, class)
+
+# Computing correlation matrix
+correlation_matrix <- round(cor(variabledf),3)
+  
+# Computing correlation matrix with p-values
+corrp.mat <- cor_pmat(variabledf)
+  
+# Visualizing the correlation matrix using 
+# square and circle methods
+# ggcorrplot(correlation_matrix, method = "square")
+# ggcorrplot(correlation_matrix, method = "circle")
+
+ggcorrplot(correlation_matrix, hc.order = TRUE, lab = TRUE, 
+           type ="upper", p.mat = corrp.mat)
+getwd()
+ggsave(filename = "corr.png", path =
+         "~/mnt/agroscope/OSLW-SYNC/99_Transfer/Sync_9981/memx",
+       device = "png", dpi = 300, units = "cm", width = 25, height = 20)
+
+rm(n, correlation_matrix,corrp.mat,variabledf)
+```
+# _________________
+# Effect of DP on animals
+```{r}
+table(d$treatment_sommerungsbeitrag[d$JAHR == 2009])
+table(d$treatment_bff_q2[d$JAHR == 2009])
+table(d$treatment_vernetzungsprojekt[d$JAHR == 2009])
+
+summary(lm(d$grazing_intensity ~ d$treatment_sommerungsbeitrag + d$year_2018 +
+                         d$treatment_sommerungsbeitrag * d$year_2018))
+
+summary(lm((d$NST_total/d$Shape_Area) ~ d$treatment_sommerungsbeitrag + d$year_2018 +
+                         d$treatment_sommerungsbeitrag * d$year_2018))
+
+summary(lm((NST_total/Shape_Area) ~ treatment_sommerungsbeitrag 
+             + year_2018 
+             + treatment_sommerungsbeitrag * year_2018
+             + private_count + GEBURT_GRUENDUNG
+             + access_trvl_time_min + Shape_Area
+             + precip + temp + population  
+             + elevation_mean + north 
+             + soil_water_capacity + soil_nutrient_capacity
+             + ProNatura_Naturschutzgebiet  
+             + Wildtierkorridor_ueberregional, data = d))
+
+summary(lm(grazing_intensity ~ treatment_sommerungsbeitrag 
+             + year_2018 
+             + treatment_sommerungsbeitrag * year_2018
+             + private_count + GEBURT_GRUENDUNG
+             + access_trvl_time_min + Shape_Area
+             + precip + temp + population  
+             + elevation_mean + north 
+             + soil_water_capacity + soil_nutrient_capacity
+             + ProNatura_Naturschutzgebiet  
+             + Wildtierkorridor_ueberregional, data = d))
+
+summary(lm(Nst_per_area ~ treatment_sommerungsbeitrag 
+             + year_2018 
+             + treatment_sommerungsbeitrag * year_2018
+             + private_count + GEBURT_GRUENDUNG
+             + access_trvl_time_min + Shape_Area
+             + precip + temp + population  
+             + elevation_mean + north 
+             + soil_water_capacity + soil_nutrient_capacity
+             + ProNatura_Naturschutzgebiet  
+             + Wildtierkorridor_ueberregional, data = d))
+
+summary(lm(formula = Nst_per_area ~ treatment_sommerungsbeitrag + year_2018 + 
+    treatment_sommerungsbeitrag * year_2018, data = d))
+
+
+```
+
+# _________________
+
+```{r}
+rm(plm.0.WC, FEtw0,fd0,FE.gls.0)
+```
+
+Model Formulas
+For computational ease we first define our regression formula.  
+```{r}
+f <- formula(bush_encr ~ DP_total_k + Nst_per_area
+               #Soemmerungsbeitrag_k ++ Vernetzungsprojekt_k + BFF_Q2_k 
+             + private_count  + GEBURT_GRUENDUNG
+             + access_trvl_time_min
+             + precip + temp + population  
+             + elevation_mean + north 
+             + soil_water_capacity + soil_nutrient_capacity
+             + ProNatura_Naturschutzgebiet  
+             + Wildtierkorridor_ueberregional + year_2018)
+
+f_t <- formula(bush_encr ~ 
+                 treatment_bff_q2
+             + treatment_vernetzungsprojekt
+             + grazing_intensity
+             + private_count  + GEBURT_GRUENDUNG
+             + access_trvl_time_min + Shape_Area
+             + precip + temp + population  
+             + elevation_mean + north 
+             + soil_water_capacity + soil_nutrient_capacity
+             + ProNatura_Naturschutzgebiet  
+             + Wildtierkorridor_ueberregional)
+```
+
+# Linear Models
+#  _
+```{r}
+summary(lm(formula = f, data = d))
+
+bptest(lm(formula = f, data = d))
+
+lmtest::coeftest(lm(formula = f, data = d), 
+                 vcov. = sandwich::vcovHC(lm(formula = f, data = d), type = "HC1"))
+
+
+summary(lm(formula = f, data = d, subset = bush_encr <= 0.2))
+summary(lm(formula = f, data = d, subset = bush_encr > 0.2))
+```
+
+```{r}
+summary(lm(formula = f_t, data = d))
+lmtest::coeftest(lm(formula = f_t, data = d), 
+                 vcov.= sandwich::vcovHC(lm(formula = f_t, data = d), type = "HC1"))
+```
+
+### Fractional logit models
+```{r}
+fract <- glm(formula = f, data = d, family = quasibinomial("logit"))
+
+summary(fract)
+margins::margins_summary(fract)
+
+bptest(fract)
+
+lmtest::coeftest(fract, vcov.= sandwich::vcovHC(fract, type="HC1"))
+
+fract0 <- glm(formula = bush_encr ~ DP_total_k, data = d, family = quasibinomial("logit"))
+
+fract1 <- glm(formula = bush_encr ~ Soemmerungsbeitrag_k + BFF_Q2_k + Vernetzungsprojekt_k, data = d, family = 
+                quasibinomial("logit"))
+
+fract2 <- glm(formula = bush_encr ~ Nst_per_area, 
+             data = d, family = quasibinomial("logit"))
+
+fract3 <- glm(formula = bush_encr ~ NST_milchkuehe_per_ha 
+              + NST_rinder_per_ha + NST_schafe_per_ha + NST_ziegen_per_ha, 
+             data = d, family = quasibinomial("logit"))
+
+fract4 <- glm(formula = bush_encr ~ Nst_per_area, 
+             data = d, family = quasibinomial("logit"))
+
+fract5 <- glm(formula = bush_encr ~ Nst_per_area
+              + BFF_Q2_k + Vernetzungsprojekt_k 
+              + private_count  + GEBURT_GRUENDUNG +  Shape_Area + precip + temp + population  
+              + elevation_mean + north 
+              + soil_water_capacity + soil_nutrient_capacity + access_trvl_time_buf_1500_max
+              + ProNatura_Naturschutzgebiet + Wildtierkorridor_ueberregional + year_2018, 
+             data = d, family = quasibinomial("logit"))
+
+fract6 <- glm(formula = bush_encr ~ NST_milchkuehe_per_ha 
+              + NST_rinder_per_ha + NST_schafe_per_ha + NST_ziegen_per_ha
+              + BFF_Q2_k + Vernetzungsprojekt_k 
+                + private_count  + GEBURT_GRUENDUNG +  Shape_Area + precip + temp + population  
+              + elevation_mean + north 
+              + soil_water_capacity + soil_nutrient_capacity + access_trvl_time_buf_1500_max
+              + ProNatura_Naturschutzgebiet + Wildtierkorridor_ueberregional + year_2018, 
+             data = d, family = quasibinomial("logit"))
+
+htmlreg(list(fract0,fract1, fract2,
+             fract3,fract4,fract5,fract6),
+        file = "~/mnt/agroscope/OSLW-SYNC/99_Transfer/Sync_9981/memx/fract_logit_1000CHF_V3.html",
+       caption = "Fractional logit model",
+       stars = c(0.001,0.01,0.05,0.1),
+       custom.header = list("% Bush encroachment on farm" = 1:7),
+       custom.model.names = c("Total Direct Payments","Direct Payments","Animals",
+                              "All Animals","Grazing intensity",
+                              "Grazing intensity, DP & controls",
+                              "Animals, DP & controls"),
+       custom.coef.names = c("Intercept","Total DP","Grazing payment [1000CHF]",
+                             "EFA Q2 [1000CHF]",
+                             "Landscape Quality [1000CHF]","NST per ha",
+                             "Milking cows per ha","Cattle per ha","Sheep per ha","Goats per ha",
+                             "Farm is private",
+                             "Age (Farmer or Farm)",
+                             "Farm size", "Avg. Precipitation 1980 - 2010","Temperature", 
+                             "Valley population",
+                             "Mean elevation", "North","Soil water capacity", 
+                             "Soil nutrientcontent",
+                             "Accessability to nearest agglomeration","Pro Natura PA",
+                             "Wildlife corridor","2018"),
+       groups = list("Direct payments" = 2:5, "NST" = 6:10, "Farm characteristics" = 11:13,"Environmental conditions" = 14:23,"Year" = 24),
+       # custom.note = "Robust SE clustered at village level for fractional logit are provided", 
+       caption.above = F,
+       digits = 3,
+       single.row = T,
+       bold = 0.1)
+
+#AIC
+-2*(-349.44)+2*length(fract0$coefficients)
+#BIC
+length(fract0$coefficients)*log10(length(fract0$fitted.values))-2*log10(349.44)
+ -2*-349.44+length(fract0$coefficients)*log10(length(fract0$fitted.values))
+
+rm(fract0,fract1, fract2,fract3,fract4,fract5,fract6)
+```
+
+### DiD Treatment effect
+#### Fractional logit
+```{r}
+#d <- mutate(d, year_2018 = ifelse(JAHR == 2018, 1, 0))
+
+fract0 <- glm(formula = bush_encr ~ treatment_dp_total + year_2018 +  treatment_dp_total * year_2018, data = d, family = quasibinomial("logit"))
+
+summary(glm(formula = bush_encr ~ treatment_bff_q2 + year_2018 +  treatment_bff_q2 * year_2018, 
+              data = d,subset = d$bush_encr <= 0.2,  family = quasibinomial("logit")))
+
+summary(glm(formula = bush_encr ~ treatment_bff_q2 + year_2018 +  treatment_bff_q2 * year_2018, 
+              data = d,subset = d$bush_encr > 0.2 & d$bush_encr <= 0.6,  family = quasibinomial("logit")))
+
+
+# summary(glm.nb(formula = bush_encr ~ treatment_dp_total + year_2018 +  treatment_dp_total * year_2018, data = d),family = quasibinomial("logit"))
+fract0 <- glm(formula = bush_encr ~ treatment_dp_total + year_2018 +  treatment_dp_total * year_2018, 
+              data = d,subset = d$bush_encr <= 0.2,  family = quasibinomial("logit"))
+
+fract1 <- glm(formula = bush_encr ~ treatment_sommerungsbeitrag + year_2018 +  
+                treatment_sommerungsbeitrag * year_2018, data = d, family = quasibinomial("logit"))
+
+fract2 <- glm(formula = bush_encr ~ treatment_bff_q2 + year_2018 +  
+                treatment_bff_q2 * year_2018, data = d, family = quasibinomial("logit"))
+
+fract3 <- glm(formula = bush_encr ~ treatment_vernetzungsprojekt + year_2018 +  
+                treatment_vernetzungsprojekt * year_2018, data = d, family = quasibinomial("logit"))
+
+fract4 <- glm(formula = bush_encr ~ treatment_sommerungsbeitrag * year_2018 + 
+                treatment_bff_q2 * year_2018  + 
+                treatment_vernetzungsprojekt * year_2018, data = d, family = 
+                quasibinomial("logit"))
+
+htmlreg(list(fract0, fract1, fract2, fract3, fract4),
+        file = "~/mnt/agroscope/OSLW-SYNC/99_Transfer/Sync_9981/memx/DiD_fract_logit_treatment.html",
+       caption = "Fractional logit model",
+       stars = c(0.001,0.01,0.05,0.1),
+       custom.header = list("% Bush encroachment on farm" = 1:5),
+       custom.model.names = c("Total DP","Grazing payment","EFA","LQ","All"),
+       custom.coef.names = c("Intercept",
+                             "Treatment Total","Post Treatment Year",
+                             "Treatment Total * Post Treatment Year",
+                             "Treatment Sommerungsbeitrag",
+                             "Treatment Sommerungsbeitrag * Post Treatment Year",
+                             "Treatment EFA",
+                             "Treatment EFA* Post Treatment Year",
+                             "Treatment LQ",
+                             "Treatment LQ * Post Treatment Year",
+                             "Post Treatment Year * Treatment EFA",
+                             "Post Treatment Year * Treatment LQ"),
+       groups = list("Increase in total DP" = 2:4, 
+                     "Increase in summering payments" = 5:6, 
+                     "Increase in EFA payments" = 7:8,
+                     "Increase in multi-actor EFA payments" = 9:10,
+                     "____________________________________" = 11:12),
+       caption.above = F,
+       digits = 3,
+       single.row = T,
+       bold = 0.1)
+```
+
+
+#### Linear model
+```{r}
+lm0 <- lm(formula = bush_encr ~ treatment_dp_total + year_2018 +  treatment_dp_total * year_2018,
+          data = d)
+lm1 <- lm(formula = bush_encr ~ treatment_sommerungsbeitrag + year_2018 +  
+                treatment_sommerungsbeitrag * year_2018, data = d)
+
+lm2 <- lm(formula = bush_encr ~ treatment_bff_q2 + year_2018 +  
+                treatment_bff_q2 * year_2018, data = d)
+
+lm3 <- lm(formula = bush_encr ~ treatment_vernetzungsprojekt + year_2018 +  
+                treatment_vernetzungsprojekt * year_2018, data = d)
+
+lm4 <- lm(formula = bush_encr ~ treatment_sommerungsbeitrag * year_2018 + 
+                treatment_bff_q2 * year_2018  + 
+                treatment_vernetzungsprojekt * year_2018, data = d)
+
+htmlreg(list(lm0,lm1, lm2,lm3,lm4),
+        file = "~/mnt/agroscope/OSLW-SYNC/99_Transfer/Sync_9981/memx/LM_DiD.html",
+       caption = "OLS",
+       stars = c(0.001,0.01,0.05,0.1),
+       custom.header = list("% Bush encroachment on farm" = 1:5),
+       custom.model.names = c("Total DP","Sömmerungsbeitrag","EFA","LQ","All"),
+       custom.coef.names = c("Intercept",
+                             "Treatment Total","Post Treatment Year",
+                             "Treatment Total * Post Treatment Year",
+                             "Treatment Grazing payment",
+                             "Treatment Grazing payment * Post Treatment Year",
+                             "Treatment EFA",
+                             "Treatment EFA* Post Treatment Year",
+                             "Treatment LQ",
+                             "Treatment LQ * Post Treatment Year",
+                             "Post Treatment Year * Treatment EFA",
+                             "Post Treatment Year * Treatment LQ"),
+       groups = list("Increase in total DP" = 2:4, 
+                     "Increase in summering payments" = 5:6, 
+                     "Increase in EFA payments" = 7:8,
+                     "Increase in LQ payments" = 9:10,
+                     "____________________________________" = 11:12),
+       custom.note = "OLS results",
+       caption.above = F,
+       digits = 3,
+       single.row = T,
+       bold = 0.1)
+
+lm5 <- lm(formula = bush_encr ~ treatment_dp_total + year_2018 +  treatment_dp_total * year_2018
+          + private_count  + GEBURT_GRUENDUNG
+             + access_trvl_time_min + Shape_Area
+             + precip + temp + population  
+             + elevation_mean + north 
+             + soil_water_capacity + soil_nutrient_capacity
+             + ProNatura_Naturschutzgebiet  
+             + Wildtierkorridor_ueberregional,
+          data = d)
+summary(lm5)
+
+
+lm6 <- lm(formula = bush_encr ~ treatment_sommerungsbeitrag * year_2018 + 
+                treatment_bff_q2 * year_2018  + 
+                treatment_vernetzungsprojekt * year_2018
+          + private_count  + GEBURT_GRUENDUNG
+             + access_trvl_time_min + Shape_Area
+             + precip + temp + population  
+             + elevation_mean + north 
+             + soil_water_capacity + soil_nutrient_capacity
+             + ProNatura_Naturschutzgebiet  
+             + Wildtierkorridor_ueberregional,
+          data = d)
+summary(lm6)
+```
+
+Plotting results
+```{r}
+l <- list(fract0,fract1,fract2,fract3,fract4)
+
+fract0 <- summary(fract0)
+fract0 <- fract0$coefficients
+fract0 <- fract0[4,c(1:2)]
+
+fract1 <- summary(fract1)
+fract1 <- fract1$coefficients
+fract1 <- fract1[4,c(1:2)]
+
+fract2 <- summary(fract2)
+fract2 <- fract2$coefficients
+fract2 <- fract2[4,c(1:2)]
+
+fract3 <- summary(fract3)
+fract3 <- fract3$coefficients
+fract3 <- fract3[4,c(1:2)]
+
+fract4 <- summary(fract4)
+fract4 <- fract4$coefficients
+fract4 <- fract4[4,c(1:2)]
+
+
+
+l <- list(lm0,lm1,lm2,lm3,lm4)
+l <- lapply(l, margins)
+l <- lapply(l, summary)
+l <- lapply(l, as_tibble)
+
+l <- do.call(rbind.data.frame, l)
+#l <- as.data.frame(rbind(fract0,fract1,fract2,fract3))
+
+lm0 <- summary(lm0)
+lm1 <- summary(lm1)
+lm2 <- summary(lm2)
+lm3 <- summary(lm3)
+lm4 <- summary(lm4)
+
+l <- as.data.frame(rbind(lm0$coefficients[4],lm1$coefficients[4],lm2$coefficients[4],lm3$coefficients[4],
+                         lm4$coefficients[6], lm4$coefficients[7]))
+
+se <- as.data.frame(rbind(lm0$coefficients[4,2],lm1$coefficients[4,2],lm2$coefficients[4,2],lm3$coefficients[4,2],
+                         lm4$coefficients[6,2], lm4$coefficients[7,2]))
+
+n <- c(names(lm0$coefficients[4]), names(lm1$coefficients[4]), names(lm2$coefficients[4]),
+              names(lm3$coefficients[4]), names(lm4$coefficients[6]), names(lm4$coefficients[7]))
+
+l <- cbind(l,se)
+l <- cbind(l,n)
+
+l
+```
+
+```{r}
+# l <- cbind(c("DiD Treatment: DP Total",
+#                 "DiD Treatment: Grazing",
+#                 "DiD Treatment: EFA",
+#                 "DiD Treatment: Multi-actor EFA"),l)
+colnames(l) <- c("Coefficient","Estimate","SE")
+l
+# l <- l %>% 
+#   filter(factor == "wildlife_conflict" | factor == "conservancy_member") %>%
+#   mutate(factor = ifelse(factor == "wildlife_conflict","HWC","CBC Member"))%>%
+#   mutate(sign = ifelse(p <= 0.1,"1","0"))
+
+
+# l$outcome <- c("Income","Income","Income diversity","Income diversity",
+#                "Food insecurity concerns", "Food insecurity concerns",
+#                "Life satisfaction","Life satisfaction",
+#                "Asset aspirations","Asset aspirations",
+#                "Income aspirations","Income aspirations",
+#                "CBC perception (HH)", "CBC perception (HH)",
+#                "CBC perception (Com)",
+#                "CBC perception (Com)")
+
+# Create short outcome titles
+# var_width = 20
+# l <- mutate(l, outcome_short = stringr::str_wrap(outcome, width = var_width))
+# l$outcome_short
+# 
+# swr <- function(string, nwrap=20) {
+#   paste(strwrap(string, width=nwrap), collapse="\n")
+# }
+# swr <- Vectorize(swr)
+# 
+# # Create line breaks in Year
+# l$outcome_short = swr(l$outcome)
+
+# Final plot
+ggplot(l) + 
+  geom_pointrange(aes(x = Coefficient))
+
+
+ggplot(data = l, aes(x = AME, y = factor,xmin = lower, xmax = upper,
+                     label = sprintf("%0.2f", round(AME, digits = 2)),
+                     show.legend = FALSE)) +
+  geom_pointrange(aes(x = AME, y = factor,color=sign), show.legend = FALSE) + 
+  facet_wrap(.~factor(outcome, levels=c('Income','Income diversity',
+                                        'Food insecurity concerns','Life satisfaction',
+                                        'Asset aspirations',
+                                        'Income aspirations',
+                                        'CBC perception (HH)',
+                                        'CBC perception (Com)')
+  ),scales = "free_x",nrow = 2) +
+  #facet_grid(.~ outcome_short, scales = "free_x") +
+  scale_colour_manual(values=c("0" = "grey", "1" = "black")) +
+  geom_vline(xintercept = 0, color = "black") +
+  labs(x = NULL, y = NULL) +
+  ggplot2::theme_bw(base_size = 13) + 
+  #geom_text(hjust = 1, nudge_y=0.2) 
+  geom_text(hjust = -0.5, nudge_y=0.2,color = "#616161") 
+
+getwd()
+ggsave(filename = "ols_V4.png",width = 30,height = 12,units = "cm", dpi = 300,path = "Output")
+
+rm(fract0,fract1,fract2,fract3,fract4,fract5)
+
+```
+
+
+
+```{r}
+f <- formula(bush_encr ~ 
+               treatment_sommerungsbeitrag*year_2018   
+             + treatment_bff_q2*year_2018 
+             + treatment_vernetzungsprojekt*year_2018
+             + private_count  + GEBURT_GRUENDUNG 
+             + precip + temp + population +  Shape_Area 
+             + elevation_mean + north 
+             + soil_water_capacity + soil_nutrient_capacity + access_trvl_time_buf_1500_max
+             #+ ProNatura_Naturschutzgebiet + Wildtierkorridor_ueberregional 
+             )
+```
+
+```{r}
+
+fract0 <- glm(formula = bush_encr ~ treatment_dp_total + year_2018 +  treatment_dp_total * year_2018, data = d, family = quasibinomial("logit"))
+
+fract1 <- glm(formula = bush_encr ~ treatment_sommerungsbeitrag + year_2018 +  
+                treatment_sommerungsbeitrag * year_2018, data = d, family = quasibinomial("logit"))
+
+fract2 <- glm(formula = bush_encr ~ treatment_bff_q2 + year_2018 +  
+                treatment_bff_q2 * year_2018, data = d, family = quasibinomial("logit"))
+
+fract3 <- glm(formula = bush_encr ~ treatment_vernetzungsprojekt + year_2018 +  
+                treatment_vernetzungsprojekt * year_2018, data = d, family = quasibinomial("logit"))
+
+fract4 <- glm(formula = bush_encr ~ treatment_sommerungsbeitrag * year_2018 + 
+                treatment_bff_q2 * year_2018  + 
+                treatment_vernetzungsprojekt * year_2018, data = d, family = 
+                quasibinomial("logit"))
+
+fract5 <- glm(formula = bush_encr ~ treatment_sommerungsbeitrag * year_2018 + 
+                treatment_bff_q2 * year_2018  + 
+                treatment_vernetzungsprojekt * year_2018 + 
+                + private_count  + GEBURT_GRUENDUNG + Shape_Area
+             + precip + temp + population
+             + elevation_mean + north 
+             + soil_water_capacity + soil_nutrient_capacity + access_trvl_time_buf_1500_max
+             + ProNatura_Naturschutzgebiet + Wildtierkorridor_ueberregional,
+             data = d, family = quasibinomial("logit"))
+
+
+htmlreg(list(fract0,fract1, fract2,fract3,fract4,fract5),
+        file = "~/mnt/Data-Work-RE/25_Agricultural_Economics-RE/252_ZA-BH_Research_protected/Projekte/2022-27_Versuchsstation_Berg_Alp_memx/R/Output/Bush_encr/fract_logit_treatment_controls.html",
+       caption = "Fractional logit model",
+       stars = c(0.001,0.01,0.05,0.1),
+       custom.header = list("% Bush encroachment on farm" = 1:6),
+       custom.model.names = c("Total DP","Sömmerungsbeitrag","EFA Q2","Multi-actor EFA","All","All & controls"),
+       custom.coef.names = c("Intercept",
+                             "Treatment Total",
+                             "Post Treatment Year",
+                             "Treatment Total * Post Treatment Year",
+                             "Treatment Sommerungsbeitrag",
+                             "Treatment Sommerungsbeitrag * Post Treatment Year",
+                             "Treatment EFA Q2",
+                             "Treatment EFA Q2* Post Treatment Year",
+                             "Treatment Landscape Quality",
+                             "Treatment Landscape Quality * Post Treatment Year",
+                             "Post Treatment Year * Treatment EFA Q2",
+                             "Post Treatment Year * Treatment Landscape Quality",
+                             "Farm is private",
+                             "Age (Farmer or Farm)",
+                             "Farm size", "Avg. Precipitation 1980 - 2010",
+                             "Temperature", 
+                             "Valley population",
+                             "Mean elevation", 
+                             "North",
+                             "Soil water capacity", 
+                             "Soil nutrientcontent",
+                             "Accessability to nearest agglomeration",
+                             "Pro Natura PA",
+                             "Wildlife corridor"
+                             ),
+       # groups = list("Increase in total DP" = 2:4, 
+       #               "Increase in summering payments" = 5:6, 
+       #               "Increase in EFA payments" = 7:8,
+       #               "Increase in multi-actor EFA payments" = 9:10,
+       #               "____________________________________" = 11:12),
+       # custom.note = "Robust SE clustered at village level for fractional logit are provided",
+       caption.above = F,
+       digits = 3,
+       single.row = T,
+       bold = 0.1)
+```
+
+```{r}
+summary(lm(formula = f, data = d))
+
+fract <- glm(formula = f, data = d, family = quasibinomial("logit"))
+
+summary(fract)
+margins::margins_summary(fract)
+
+bptest(fract)
+
+lmtest::coeftest(fract, vcov.= sandwich::vcovHC(fract, type="HC1"))
+```
+
+
+## Tobit model
+We run two models: one (t4) with no transformation of the data and one (t5) with a log transformation of the environmental income variable as follows: 
+log10(d$env_gross_income + 1). 
+```{r}
+summary(crch::crch(f, data = d,left = 0))
+
+summary(crch::crch(bush_encr ~ treatment_dp_total + year_2018 +  treatment_dp_total * year_2018, 
+                   data = d,left = 0))
+
+summary(crch::crch(bush_encr ~ treatment_bff_q2 + year_2018 + treatment_bff_q2 * year_2018,
+                   data = d, left = 0))
+
+summary(crch::crch(formula = bush_encr ~ treatment_vernetzungsprojekt + year_2018 + 
+                  treatment_vernetzungsprojekt * year_2018, 
+                   data = d,left = 0))
+```
+
+# ______
+
+# Panel estimation
+```{r}
+pdf <- plm::pdata.frame(d)
+
+pmf <- formula(bush_encr ~ treatment_sommerungsbeitrag_varying
+             + treatment_bff_q2_varying
+             + treatment_vernetzungsprojekt_varying
+             + Nst_per_area
+             + private_count  + GEBURT_GRUENDUNG
+             + access_trvl_time_min + Shape_Area
+             + precip + temp + population  
+             + elevation_mean + north 
+             + soil_water_capacity + soil_nutrient_capacity
+             + ProNatura_Naturschutzgebiet  
+             + Wildtierkorridor_ueberregional)
+pmf_td <- formula(bush_encr ~ d$treatment_sommerungsbeitrag * year_2018 +
+                 treatment_bff_q2 * year_2018 + 
+                  treatment_vernetzungsprojekt * year_2018
+             + Nst_per_area
+             + private_count  + GEBURT_GRUENDUNG
+             + access_trvl_time_min + Shape_Area
+             + precip + temp + population  
+             + elevation_mean + north 
+             + soil_water_capacity + soil_nutrient_capacity
+             + ProNatura_Naturschutzgebiet  
+             + Wildtierkorridor_ueberregional + year_2018)
+```
+
+### Specification test
+All possible models are calculated in order to do specification tests
+```{r}
+pool <-   plm(formula = pmf, data = pdf, model = "pooling")
+pool_td <-   plm(formula = pmf_td, data = pdf, model = "pooling")
+
+fe <- plm(formula = pmf,data = pdf, effect = "individual" ,model = "within")
+fe_td <- plm(formula = pmf_td,data = pdf, effect = "individual" ,model = "within")
+fe_tw <- plm(formula = pmf,data = pdf, effect = "twoways" ,model = "within")
+
+re_between <- plm(formula = pmf,data = pdf, model = "between")
+re_random <- plm(formula = pmf,data = pdf, model = "random")
+re_random_td <- plm(formula = pmf_td,data = pdf, model = "random")
+
+fd <- plm(formula = pmf,data = pdf, effect = "individual" ,model = "fd")
+```
+
+#### AAE procedure using F-Test
+Another testing procedure from _Advanced Applied Econometrics_ class by Prof. Sebastian Hess.   
+1) F-Test for pooled OLS or FE? Null: FE is insignificant
+```{r}
+pFtest(fe, pool)
+```
+FE is significant! 
+
+2) F-Test for time dummies, Null:insignificant time dummy effects
+```{r}
+pFtest(fe_td,pool_td)
+```
+
+We have significant time dummy effects -> use time dummys.
+
+Breusch-Pagan Lagrange Multiplier test: Null: Random effect is insignificant, use OLS
+Breusch-Pagan Lagrange Multiplier for random effects. Null is no panel effect (i.e. OLS better)
+```{r}
+plmtest(pool, type = c("bp"))
+```
+
+```{r}
+plmtest(pool_td, type = c("bp"))
+```
+
+Testing time-fixed effects. The null is that no time-fixed effects needed. Both tests do the same
+
+```{r}
+pFtest(fe, fe_td, type = c("bp"))
+```
+  
+```{r}
+plmtest(fe,  c("time"), type=("bp"))
+```
+We cannot reject the hypothesis that we have significant time effects. 
+
+**Apparently a FE or RE Model _without_ time dummies should be used.** (Following Prof. Hess)
+
+All tests lead to the conclusion that we have _individual_ effects.
+
+#### FE vs. RE
+Checking fixed vs random using the hausman test.
+
+Null hypothesis is that the preferred model is random effects vs. the alternative the fixed effects. It tests whether the unique errors (ui) are correlated with the regressors, the null hypothesis is they are not, i.e. we have no unobserved, individual heterogeneity (alphas).
+
+```{r}
+phtest(fe, re_between) 
+phtest(fe, re_random)
+phtest(fe_td, re_random_td)
+```
+Both tests yield that the H0 is being rejected. For 1) this means that we reject H0 that we have no individual FE.
+
+#### First Difference
+Dickey-Fuller test to check for stochastic trends. The null hypothesis is that the series has a unit root (i.e. non-stationary). If unit root is present you can take the first difference of the variable. 
+```{r}
+#install.packages("tseries")
+library(tseries)
+adf.test(pdf$bush_encr)
+```
+
+#### Serial correlation
+##### Wooldridge's first-difference test for serial correlation in panels
+
+```{r}
+pwfdtest(pmf, data = pdf, h0 = "fe")
+```
+Result: NA
+
+
+#####  Breusch–Godfrey Test for serial correlation in Panel Models 
+Test of serial correlation for (the idiosyncratic component of) the errors in panel models.
+```{r}
+pbgtest(fe)
+pbgtest(fe_tw)
+
+pbgtest(re_random)
+pbgtest(re_random_td)
+```
+Result: We have serial correlation in idiosyncratic errors. 
+
+##### Wooldrige test for serial correlation in FE panel model
+Test of serial correlation for (the idiosyncratic component of) the errors in fixed–effects panel models
+```{r}
+pwartest(fe)
+```
+Result: We have serial correlation in idiosyncratic errors. 
+
+#### Heteroskedasticity test
+Breusch-Pagan Test
+```{r}
+library(lmtest)
+bptest(pmf,data = pdf)
+```
+Result: hetersokedaticity is detected. 
+Use robust covariance matrix to account for it as follows:
+
+```{r}
+vcov <- vcovHC(re_random,type = "HC0", method = "arellano", cluster = "group")
+coeftest(re_random, vcov. = vcov)
+```
+
+Cleanup
+
+```{r}
+rm(fe,fe_td,fe_tw,pool,pool_td,re_between, re_random,re_random_td,vcov)
+```
+
+# Final panel results
+```{r}
+re_total_DP <- pldv(formula = bush_encr ~ treatment_dp_total_varying
+             #+ Nst_per_area
+             + private_count  + GEBURT_GRUENDUNG
+             + access_trvl_time_min + Shape_Area
+             + precip + temp + population  
+             + elevation_mean + north 
+             + soil_water_capacity + soil_nutrient_capacity
+             + ProNatura_Naturschutzgebiet  
+             + Wildtierkorridor_ueberregional,
+                data = pdf, 
+                lower = 0,
+                upper = 1,
+                # effect = "individual",
+                model = "random",
+                method = "bfgs")
+
+re_grazing <- pldv(formula = bush_encr ~ treatment_sommerungsbeitrag_varying
+             #+ Nst_per_area
+             + private_count  + GEBURT_GRUENDUNG
+             + access_trvl_time_min + Shape_Area
+             + precip + temp + population  
+             + elevation_mean + north 
+             + soil_water_capacity + soil_nutrient_capacity
+             + ProNatura_Naturschutzgebiet  
+             + Wildtierkorridor_ueberregional,
+             data = pdf, 
+                lower = 0,
+                upper = 1,
+                # effect = "individual",
+                model = "random",
+                method = "bfgs")
+
+re_bff <- pldv(formula = bush_encr ~ treatment_bff_q2_varying
+             #+ Nst_per_area
+             + private_count  + GEBURT_GRUENDUNG
+             + access_trvl_time_min + Shape_Area
+             + precip + temp + population  
+             + elevation_mean + north 
+             + soil_water_capacity + soil_nutrient_capacity
+             + ProNatura_Naturschutzgebiet  
+             + Wildtierkorridor_ueberregional,
+             data = pdf, 
+                lower = 0,
+                upper = 1,
+                # effect = "individual",
+                model = "random",
+                method = "bfgs")
+
+
+re_lq <- pldv(formula = bush_encr ~ treatment_vernetzungsprojekt_varying
+             #+ Nst_per_area
+             + private_count  + GEBURT_GRUENDUNG
+             + access_trvl_time_min + Shape_Area
+             + precip + temp + population  
+             + elevation_mean + north 
+             + soil_water_capacity + soil_nutrient_capacity
+             + ProNatura_Naturschutzgebiet  
+             + Wildtierkorridor_ueberregional,
+             data = pdf, 
+                lower = 0,
+                upper = 1,
+                # effect = "individual",
+                model = "random",
+                method = "bfgs")
+
+re_ALL <- pldv(formula = bush_encr ~ treatment_sommerungsbeitrag_varying 
+             + treatment_bff_q2_varying
+             + treatment_vernetzungsprojekt_varying
+             #+ Nst_per_area
+             + private_count  + GEBURT_GRUENDUNG
+             + access_trvl_time_min + Shape_Area
+             + precip + temp + population  
+             + elevation_mean + north 
+             + soil_water_capacity + soil_nutrient_capacity
+             + ProNatura_Naturschutzgebiet  
+             + Wildtierkorridor_ueberregional,
+             data = pdf, subset = quantile(),
+                lower = 0,
+                upper = 1,
+                # effect = "individual",
+                model = "random",
+                method = "bfgs")
+
+htmlreg(list(re_total_DP, re_grazing, re_bff,re_lq,re_ALL),
+        file = "~/mnt/agroscope/OSLW-SYNC/99_Transfer/Sync_9981/memx/plm_V2_wo_density.html",
+       caption = "Random effects linear and limited dependent variable panel models",
+       stars = c(0.001,0.01,0.05,0.1),
+       # custom.header = list("% Bush encroachment on farm" = 1:7),
+        custom.model.names = c("Total DP Treatment","Grazing Treatment","EFA Treatment","LQ Treatment","All"),
+       # custom.coef.names = c("Intercept","Total DP",
+       #                       "Livestock density (NST/ha)","Age (Farmer or Farm)",
+       #                       "Farm is private",
+       #                       "Farm size", "Avg. Precipitation 1980 - 2010","Temperature",
+       #                       "Valley population",
+       #                       "Mean elevation", "North","Soil water capacity",
+       #                       "Soil nutrientcontent",
+       #                       "Accessability to nearest agglomeration","Pro Natura PA",
+       #                       "Wildlife corridor",
+       #                       "sd.nu","sd.eta",
+       #                       "Grazing payment",
+       #                       "EFA",
+       #                       "Landscape Quality"),
+       # groups = list("Direct payments" = 2:5, "NST" = 6:12, "Farm characteristics" = 13:15,"Environmental conditions" = 16:25,"Year" = 26),
+       # custom.note = "Robust SE clustered at village level for fractional logit are provided", 
+       caption.above = F,
+       digits = 3,
+       single.row = T,
+       bold = 0.1)
+```
+# ______
+# Mechanism Analysis
+# T on Y
+```{r}
+T_on_Y <- pldv(bush_encr ~ 
+               treatment_sommerungsbeitrag_varying
+             + treatment_bff_q2_varying
+             + treatment_vernetzungsprojekt_varying
+             + private_count  + GEBURT_GRUENDUNG
+             + access_trvl_time_min + Shape_Area
+             + precip + temp + population
+             + elevation_mean + north
+             + soil_water_capacity + soil_nutrient_capacity
+             + ProNatura_Naturschutzgebiet
+             + Wildtierkorridor_ueberregional,
+                data = pdf,
+                lower = 0,
+                upper = 1,
+                # effect = "individual",
+                model = "random",
+                method = "bfgs")
+```
+# T on M
+```{r}
+T_on_M <- plm(Nst_per_area ~ treatment_sommerungsbeitrag_varying 
+             + private_count  + GEBURT_GRUENDUNG
+             + access_trvl_time_min + Shape_Area
+             + precip + temp + population  
+             + elevation_mean + north 
+             + soil_water_capacity + soil_nutrient_capacity
+             + ProNatura_Naturschutzgebiet  
+             + Wildtierkorridor_ueberregional, 
+                data = pdf,
+                #effect = "individual",
+                model = "random")
+```
+# T & M on Y
+```{r}
+T_M_on_Y <- pldv(bush_encr ~ 
+               treatment_sommerungsbeitrag_varying   
+             + treatment_bff_q2_varying
+             + treatment_vernetzungsprojekt_varying
+             + treatment_NST_varying 
+             + private_count  + GEBURT_GRUENDUNG
+             + access_trvl_time_min + Shape_Area
+             + precip + temp + population  
+             + elevation_mean + north 
+             + soil_water_capacity + soil_nutrient_capacity
+             + ProNatura_Naturschutzgebiet  
+             + Wildtierkorridor_ueberregional, 
+                data = pdf,
+            lower = 0,
+                upper = 1,
+                # effect = "individual",
+                model = "random",
+                method = "bfgs")
+
+
+T_M_type_on_Y <- pldv(bush_encr ~ 
+         treatment_sommerungsbeitrag_varying   
+     + treatment_bff_q2_varying
+     + treatment_vernetzungsprojekt_varying
+     + NST_milchkuehe_per_ha + NST_rinder_per_ha 
+     + NST_schafe_per_ha + NST_ziegen_per_ha 
+     + private_count  + GEBURT_GRUENDUNG
+     + access_trvl_time_min + Shape_Area
+     + precip + temp + population  
+     + elevation_mean + north 
+     + soil_water_capacity + soil_nutrient_capacity
+     + ProNatura_Naturschutzgebiet  
+     + Wildtierkorridor_ueberregional, 
+     data = pdf,
+     lower = 0,
+     upper = 1,
+     # effect = "individual",
+     model = "random",
+     method = "bfgs")
+```
+
+### Export
+```{r}
+htmlreg(list(T_on_Y,T_on_M ,T_M_on_Y),
+        file = "~/mnt/agroscope/OSLW-SYNC/99_Transfer/Sync_9981/memx/mechanism_analysis_V1.html",
+       caption = "Random effects linear and limited dependent variable panel models",
+       stars = c(0.001,0.01,0.05,0.1),
+       # custom.header = list("% Bush encroachment on farm" = 1:7),
+        custom.model.names = c("T on Y","T on M","T & M on Y"),
+       # custom.coef.names = c("Intercept",
+       #                        "Grazing payment",
+       #                       "EFA",
+       #                       "Landscape Quality",
+       #                       "Increasing NST treatment",
+       #                       "Farm is private",
+       #                       "Age (Farmer or Farm)",
+       #                       "Accessability to nearest agglomeration",
+       #                       
+       #                       "Farm size", "Avg. Precipitation 1980 - 2010","Temperature",
+       #                       "Valley population",
+       #                       "Mean elevation", "North","Soil water capacity",
+       #                       "Soil nutrientcontent",
+       #                       "Pro Natura PA",
+       #                       "Wildlife corridor",
+       #                       "sd.nu","sd.eta"
+       #                       ),
+       # groups = list("Direct payments" = 2:5, "NST" = 6:12, "Farm characteristics" = 13:15,"Environmental conditions" = 16:25,"Year" = 26),
+       # custom.note = "Robust SE clustered at village level for fractional logit are provided", 
+       caption.above = F,
+       digits = 3,
+       single.row = T,
+       bold = 0.1)
+```
+# ______
+
+# Quantile regression
+```{r}
+fract_below_02 <- glm(formula = f, data = d, family = quasibinomial("logit"), subset = bush_encr <= 0.2)
+bptest(fract_below_02)
+lmtest::coeftest(fract_below_02, vcov.= sandwich::vcovHC(fract_below_02, type="HC1"))
+margins::margins_summary(fract_below_02)
+
+
+fract_above_02 <- glm(formula = f, data = d, family = quasibinomial("logit"), subset = bush_encr > 0.2)
+bptest(fract_above_02)
+lmtest::coeftest(fract_above_02, vcov.= sandwich::vcovHC(fract_above_02, type="HC1"))
+margins::margins_summary(fract_above_02)fg
+rm(fract_below_02,fract_above_02)
+
+summary(glm(formula = bush_encr ~ Soemmerungsbeitrag_k ++ Vernetzungsprojekt_k 
+             +  BFF_Q2_k
+             + grazing_intensity
+             + private_count  + GEBURT_GRUENDUNG
+             + access_trvl_time_min + Shape_Area
+             + precip + temp + population  
+             + elevation_mean + north 
+             + soil_water_capacity + soil_nutrient_capacity
+             + ProNatura_Naturschutzgebiet  
+             + Wildtierkorridor_ueberregional + year_2018, 
+            data = d, family = quasibinomial("logit"), subset = bush_encr <= 0.5))
+
+summary(glm(formula = bush_encr ~ Soemmerungsbeitrag_k 
+             + Vernetzungsprojekt_k + BFF_Q2_k 
+             + grazing_intensity
+             + private_count  + GEBURT_GRUENDUNG
+             + access_trvl_time_min + Shape_Area
+             + precip + temp + population  
+             + elevation_mean + north 
+             + soil_water_capacity + soil_nutrient_capacity
+             + ProNatura_Naturschutzgebiet  
+             + Wildtierkorridor_ueberregional + year_2018, 
+            data = d, family = quasibinomial("logit"), subset = bush_encr > 0.5))
+```
+
+```{r}
+install.packages("quantreg")
+library(quantreg)
+
+model <- rq(formula = bush_encr ~ NST_milchkuehe + NST_rinder + NST_schafe + NST_ziegen +
+              NST_andere 
+            + BFF_Q2_k + Vernetzungsprojekt_k 
+            + private_count  + GEBURT_GRUENDUNG +  Shape_Area + precip + temp + population  
+            + elevation_mean + north 
+            + soil_water_capacity + soil_nutrient_capacity + access_trvl_time_buf_1500_max
+            + ProNatura_Naturschutzgebiet + Wildtierkorridor_ueberregional + year_2018, 
+            data = d, 
+            tau = 0.5)
+
+```
+
+For panel data 
+```{r}
+summary(pldv(formula = bush_encr ~ treatment_sommerungsbeitrag_varying 
+             + treatment_bff_q2_varying
+             + treatment_vernetzungsprojekt_varying
+             #+ Nst_per_area
+             + private_count  + GEBURT_GRUENDUNG
+             + access_trvl_time_min + Shape_Area
+             + precip + temp + population  
+             + elevation_mean + north 
+             + soil_water_capacity + soil_nutrient_capacity
+             + ProNatura_Naturschutzgebiet  
+             + Wildtierkorridor_ueberregional,
+             data = pdf, subset = d$bush_encr >= quantile(d$bush_encr,0.75),
+             lower = 0,
+             upper = 1,
+             # effect = "individual",
+             model = "random",
+             method = "bfgs"))
+
+summary(pldv(formula = bush_encr ~ treatment_sommerungsbeitrag_varying 
+             + treatment_bff_q2_varying
+             + treatment_vernetzungsprojekt_varying
+             #+ Nst_per_area
+             + private_count  + GEBURT_GRUENDUNG
+             + access_trvl_time_min + Shape_Area
+             + precip + temp + population  
+             + elevation_mean + north 
+             + soil_water_capacity + soil_nutrient_capacity
+             + ProNatura_Naturschutzgebiet  
+             + Wildtierkorridor_ueberregional,
+             data = pdf, 
+             subset = d$bush_encr < quantile(d$bush_encr,0.75) & 
+                      d$bush_encr >= quantile(d$bush_encr,0.5),
+             lower = 0,
+             upper = 1,
+             # effect = "individual",
+             model = "random",
+             method = "bfgs"))
+
+summary(pldv(formula = bush_encr ~ treatment_sommerungsbeitrag_varying 
+             + treatment_bff_q2_varying
+             + treatment_vernetzungsprojekt_varying
+             #+ Nst_per_area
+             + private_count  + GEBURT_GRUENDUNG
+             + access_trvl_time_min + Shape_Area
+             + precip + temp + population  
+             + elevation_mean + north 
+             + soil_water_capacity + soil_nutrient_capacity
+             + ProNatura_Naturschutzgebiet  
+             + Wildtierkorridor_ueberregional,
+             data = pdf, 
+             subset = d$bush_encr < quantile(d$bush_encr,0.5) & 
+                      d$bush_encr >= quantile(d$bush_encr,0.25),
+             lower = 0,
+             upper = 1,
+             # effect = "individual",
+             model = "random",
+             method = "bfgs"))
+
+summary(pldv(formula = bush_encr ~ treatment_sommerungsbeitrag_varying 
+             + treatment_bff_q2_varying
+             + treatment_vernetzungsprojekt_varying
+             #+ Nst_per_area
+             + private_count  + GEBURT_GRUENDUNG
+             + access_trvl_time_min + Shape_Area
+             + precip + temp + population  
+             + elevation_mean + north 
+             + soil_water_capacity + soil_nutrient_capacity
+             + ProNatura_Naturschutzgebiet  
+             + Wildtierkorridor_ueberregional,
+             data = pdf, 
+             subset = d$bush_encr < quantile(d$bush_encr,0.25),
+             lower = 0,
+             upper = 1,
+             # effect = "individual",
+             model = "random",
+             method = "bfgs"))
+```
+# _________________
+# Matching
+
+Subset for pre treatment year
+```{r}
+d_2009 <- filter(d, JAHR == 2009)
+```
+
+### MatchIt
+```{r}
+#install.packages("MatchIt")
+library(MatchIt)
+
+m_it <- MatchIt::matchit(treatment_sommerungsbeitrag ~ 
+               private_count  + GEBURT_GRUENDUNG              
+             + precip + temp + population +  Shape_Area 
+             + elevation_mean + north +
+             + soil_water_capacity + soil_nutrient_capacity + access_trvl_time_min
+             + ProNatura_Naturschutzgebiet + Wildtierkorridor_ueberregional
+             ,
+             data = d, method = "nearest",distance = "probit")
+
+summary(m_it$model)
+rm(m_it)
+```
+
+We use four different approaches of estimating a propensity score that is used for weighting.    
+
+```{r}
+m <- formula(treatment_sommerungsbeitrag ~ 
+               NST_total+ private_count  + GEBURT_GRUENDUNG  
+             + grazing_intensity
+             + precip + temp + population +  Shape_Area 
+             + elevation_mean + north 
+             + soil_water_capacity + soil_nutrient_capacity + access_trvl_time_buf_1500_max
+             + ProNatura_Naturschutzgebiet + Wildtierkorridor_ueberregional 
+             )
+```
+
+### GLM
+Standard probit model 
+```{r include=TRUE}
+reg1 <- glm(formula = m, family = binomial(link = "probit"), data = d, subset = (d$JAHR == 2009))
+summary(reg1)
+logLik(reg1)
+BIC(reg1)
+margins_summary(reg1)
+```
+
+### CBPS
+```{r}
+#install.packages("CBPS")
+#library(CBPS)
+cbps_model <- CBPS::CBPS(m, data = d_2009, standardize = F)
+
+# summary(cbps_model$weights)
+plot(cbps_model, covars = NULL, boxplot = T)
+print(cbps_model)
+CBPS::balance(cbps_model)
+# #AIC
+# -2*(-349.44)+2*length(cbps_model$coefficients)
+# #BIC
+# length(cbps_model$coefficients)*log10(length(cbps_model$fitted.values))-2*log10(349.44)
+# -2*-349.44+length(cbps_model$coefficients)*log10(length(cbps_model$fitted.values))
+```
+#### Add weight to dataframe
+GLM
+```{r include=TRUE}
+d_2009$glm_weight <- d_2009$treatment_dp_total + (1 - d_2009$treatment_dp_total)*(reg1$fitted.values/(1 - reg1$fitted.values))
+# normalize 
+d_2009$glm_weight <- d_2009$glm_weight*length(d_2009$KT_ID_B)/sum(d_2009$glm_weight)
+# hist(d_2009$glm_weight, breaks = 50)
+# summary(d_2009$glm_weight)
+```
+CBPS
+```{r include=TRUE}
+d_2009$cbps_weight <- cbps_model$weights
+# normalize 
+d_2009$cbps_weight <- d_2009$cbps_weight*length(d_2009$KT_ID_B)/sum(d_2009$cbps_weight)
+```
+
+#### Love plot
+```{r}
+# install.packages("cobalt")
+library(cobalt)
+love.plot(m,
+         data = d_2009,
+         estimand = "ATT",
+         weights = list(w1 = d_2009$glm_weight),
+         var.order = "unadjusted",
+         abs = FALSE,
+         drop.distance = FALSE,
+         #line = TRUE,
+         m.threshold=.05,
+         stars = "raw")
+
+love.plot(m,
+         data = d_2009,
+         estimand = "ATT",
+         weights = list(w1 = d_2009$glm_weight,
+                        w2 = d_2009$cbps_weight),
+         var.order = "unadjusted",
+         abs = FALSE,
+         drop.distance = FALSE,
+         #line = TRUE,
+         m.threshold = .05,
+         stars = "raw",
+         #var.names = new.names,
+         colors = c( "grey","#E69F00", "darkgreen"),
+         shapes = c("circle","square","triangle"),
+         sample.names = c( "Unadjusted","GLM weighted","CBPS weights"))
+```
+
+Plot of propensity score improvement for CBPS
+```{r include=TRUE}
+bal.plot(reg1, data = d_2009, which = "both", var.name = 'distance', colors = c("black","blue"))
+bal.plot(cbps_model, data = d_2009, which = "both", var.name = 'prop.score', colors = c("black","blue"))
+
+```
+
+```{r include=TRUE}
+d_2009 <- subset(d_2009, select = c(ALPNR, cbps_weight))
+d_2009$JAHR <- 2009
+head(d_2009)
+
+d_test <- merge(d,d_2009, by = c("ALPNR","JAHR"), all.y = T)
+
+rm(d_test)
+```
+
+```{r}
+library(Matching)
+reg1 <- glm(private_count ~ Soemmerungsbeitrag_k + Vernetzungsprojekt_k + BFF_Q2_k +
+               GEBURT_GRUENDUNG
+             + access_trvl_time_min + Shape_Area
+             + precip + temp + population  
+             + elevation_mean + north 
+             + soil_water_capacity + soil_nutrient_capacity
+             + ProNatura_Naturschutzgebiet  
+             + Wildtierkorridor_ueberregional + year_2018,
+            family = binomial(link = "probit"), 
+            data = d)
+d$pscore <- fitted(reg1)
+
+dm <- with(d, data.frame(Soemmerungsbeitrag_k, Vernetzungsprojekt_k, BFF_Q2_k,
+                         GEBURT_GRUENDUNG, access_trvl_time_min, Shape_Area,
+                         precip, temp, population, elevation_mean, north,
+                         soil_water_capacity, soil_nutrient_capacity, 
+                         ProNatura_Naturschutzgebiet, Wildtierkorridor_ueberregional,
+                         year_2018))
+# Propensity Score Matching (PSM)
+rr1 <- Match(Y = d$bush_encr,X = d$pscore,Tr = d$private_count)
+summary(rr1)
+
+# Check balance of covariates
+balstat1 <- bal.tab(rr1, 
+                   f.build("private_count", dm), 
+                   data = d, 
+                   un = T, 
+                   disp.v.ratio = T)
+balstat1
+love.plot(balstat1, stat = "mean.diffs", threshold = 0.1)
+love.plot(balstat1, stat = "variance.ratios", threshold = 0.1)
+
+rm(reg1,dm,rr1)
+```
+
+# _________________
+# Synthetic Control
+```{r}
+install.packages("Synth")
+library(Synth)
+
+install.packages("SCtools")
+library(SCtools)
+
+SCtools::multiple_synth()
+Synth::synth()
+```
